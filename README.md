@@ -86,6 +86,10 @@ curl http://localhost:3001/api/health/deep
 # }
 ```
 
+Each component check has a 5-second timeout by default. Configure the per-component
+timeout in milliseconds with `DEEP_HEALTH_CHECK_TIMEOUT_MS`; checks that exceed it
+are reported as down.
+
 If any component is `"down"`, the endpoint returns HTTP 503. Set `MAINTAINER_PUBLIC_KEY`, `ARBITER_ADDRESS`, and `SOROBAN_CONTRACT_ID` in your environment, and ensure the Soroban RPC URL is reachable.
 
 ### Dispute lifecycle
@@ -187,6 +191,9 @@ Routes:
     ```
   - **Error Responses**:
     - `429 Too Many Requests` — rate limit exceeded.
+  - Each component check times out after 5 seconds by default. Set
+    `DEEP_HEALTH_CHECK_TIMEOUT_MS` to configure the per-component timeout in milliseconds;
+    timed-out checks are reported as down.
 - `GET /api/bounties` — list and filter bounties
   - **Query Parameters**:
     - `q` (optional): Free-text search keyword.

@@ -866,7 +866,18 @@
           "System"
         ],
         "summary": "Health check",
-        "description": "Returns the service name and current server timestamp. Use this to verify the API is reachable.",
+        "description": "Returns the service name and current server timestamp. Use this to verify the API is reachable. An optional `Idempotency-Key` header replays the original response for retries made with the same key.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional key used to replay the original response for repeated requests."
+            },
+            "required": false,
+            "name": "Idempotency-Key",
+            "in": "header"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Service is healthy.",
@@ -887,7 +898,7 @@
           "System"
         ],
         "summary": "Deep health check",
-        "description": "Extended health check that verifies all external dependencies. Checks JSON store read/write, Soroban RPC reachability, contract ID configuration, and auth configuration (MAINTAINER_PUBLIC_KEY and ARBITER_ADDRESS). Excluded from rate limiting. Returns HTTP 503 when any critical component is down.",
+        "description": "Extended health check that verifies all external dependencies. Checks JSON store read/write, Soroban RPC reachability, contract ID configuration, and auth configuration (MAINTAINER_PUBLIC_KEY and ARBITER_ADDRESS). Each component check has a configurable timeout via DEEP_HEALTH_CHECK_TIMEOUT_MS (default 5000 ms); a timed-out component is reported as down. Excluded from rate limiting. Returns HTTP 503 when any critical component is down.",
         "responses": {
           "200": {
             "description": "All critical components are healthy.",
@@ -895,6 +906,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeepHealthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input: the route accepts no path parameters, query string, or request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -918,7 +939,7 @@
           "Bounties"
         ],
         "summary": "List all bounties",
-        "description": "Returns bounty records sorted by `createdAt` descending by default, with optional maintainer/status/token filters and sort parameters. Bounties whose deadline has passed are automatically transitioned to `expired` before the list is returned.",
+        "description": "Returns bounty records sorted by `createdAt` descending by default, with optional maintainer/status/token filters and sort parameters. Bounties whose deadline has passed are automatically transitioned to `expired` before the list is returned. An optional `Idempotency-Key` header replays the original response for retries made with the same key.",
         "parameters": [
           {
             "schema": {
@@ -1079,6 +1100,15 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional key used to replay the original response for repeated requests."
+            },
+            "required": false,
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "responses": {

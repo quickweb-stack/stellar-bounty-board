@@ -33,6 +33,10 @@ export interface AppConfig {
   rateLimitBountiesMax: number;
   /** Rate limit window in milliseconds for bounties list endpoint (default: 60000 = 1 minute). */
   rateLimitBountiesWindowMs: number;
+  /** Maximum health check requests per window (default: 300). */
+  rateLimitHealthMax: number;
+  /** Rate limit window in milliseconds for health check endpoint (default: 60000 = 1 minute). */
+  rateLimitHealthWindowMs: number;
   /** Default pagination limit for list endpoints (default: 20). */
   defaultPageSize: number;
   /** Maximum allowable pagination limit for list endpoints (default: 100). */
@@ -81,10 +85,9 @@ export function getAppConfig(): AppConfig {
       60_000
     ),
     rateLimitBountiesMax: parsePositiveInt(process.env.RATE_LIMIT_BOUNTIES_MAX, 60),
-    rateLimitBountiesWindowMs: parsePositiveInt(
-      process.env.RATE_LIMIT_BOUNTIES_WINDOW_MS,
-      60_000
-    ),
+    rateLimitBountiesWindowMs: parsePositiveInt(process.env.RATE_LIMIT_BOUNTIES_WINDOW_MS, 60_000),
+    rateLimitHealthMax: parsePositiveInt(process.env.RATE_LIMIT_HEALTH_MAX, 300),
+    rateLimitHealthWindowMs: parsePositiveInt(process.env.RATE_LIMIT_HEALTH_WINDOW_MS, 60_000),
     defaultPageSize: parsePositiveInt(process.env.DEFAULT_PAGE_SIZE, 20),
     maxPageSize: parsePositiveInt(process.env.MAX_PAGE_SIZE, 100),
     defaultLeaderboardLimit: parsePositiveInt(process.env.DEFAULT_LEADERBOARD_LIMIT, 10),

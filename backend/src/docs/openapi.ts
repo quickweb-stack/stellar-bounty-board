@@ -128,9 +128,15 @@ registry.registerPath({
     "Extended health check that verifies all external dependencies. " +
     "Checks JSON store read/write, Soroban RPC reachability, contract ID configuration, " +
     "and auth configuration (MAINTAINER_PUBLIC_KEY and ARBITER_ADDRESS). " +
+    "Each component check has a configurable timeout via DEEP_HEALTH_CHECK_TIMEOUT_MS " +
+    "(default 5000 ms); a timed-out component is reported as down. " +
     "Excluded from rate limiting. Returns HTTP 503 when any critical component is down.",
   responses: {
     200: jsonResponse("All critical components are healthy.", deepHealthResponseSchema),
+    400: jsonResponse(
+      "Invalid input: the route accepts no path parameters, query string, or request body.",
+      errorResponseSchema
+    ),
     503: jsonResponse("One or more critical components are down.", deepHealthResponseSchema),
   },
 });
