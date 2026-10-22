@@ -4,19 +4,16 @@
 import axios from "axios";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+import { isMainThread, parentPort } from "worker_threads";
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import { loadIndexerConfig } from "./indexerConfig.js";
-let parentPort;
-try {
-  // worker_threads parentPort is available when running as a Worker
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  parentPort = require("worker_threads").parentPort;
-} catch (e) {
-  parentPort = undefined;
-}
 
 // CONFIGURATION
 const CONTRACT_ID = process.env.SOROBAN_CONTRACT_ID || ""; // Set in env
 const SOROBAN_RPC_URL = process.env.SOROBAN_RPC_URL || "https://rpc-futurenet.stellar.org";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const INDEX_FILE = path.join(__dirname, "indexed-events.json");
 
 // Operational settings are env-driven (see indexerConfig.js for the variables
@@ -47,18 +44,78 @@ async function retryWithBackoff(fn, maxRetries = MAX_RETRIES) {
   throw lastError;
 }
 
-// Event normalization mapping
-function normalizeEvent(event) {
-  // Example: map Soroban event to backend-friendly record
-  // Adjust mapping as contract evolves
-  return {
-    id: event.id,
-    type: event.type, // create, reserve, release, refund
-    bountyId: event.bounty_id,
-    actor: event.actor,
-    timestamp: event.timestamp,
+const EVENT_TYPES = {
+  Create: "create",
+  Reserv: "reserve",
+  Submit: "submit",
+  Releas: "release",
+  Refund: "refund",
+  Dispt: "disputed",
+};
+
+function decodeScVal(value) {
+  if (typeof value !== "string") return value;
+  return scValToNative(xdr.ScVal.fromXDR(value, "base64"));
+}
+
+function eventData(value) {
+  const decoded = decodeScVal(value);
+  if (decoded instanceof Map) {
+    return Object.fromEntries(decoded.entries());
+  }
+  return decoded && typeof decoded === "object" ? decoded : {};
+}
+
+function jsonSafe(value) {
+  return typeof value === "bigint" ? value.toString() : value;
+}
+
+function addressString(value) {
+  return typeof value === "string" || value == null ? value : value.toString();
+}
+
+// Decode Soroban's XDR topics and value before passing events to consumers.
+//
+// Topic layout for the release transition (documented in the contract):
+//   topic[0] = "Bounty" (symbol)
+//   topic[1] = "Releas" (symbol)
+//   value    = BountyReleased { bounty_id, contributor, maintainer, amount }
+// The payload is sufficient on its own, so the worker does not need a follow-up
+// contract read to react to this transition.
+export function normalizeEvent(event) {
+  const topics = Array.isArray(event.topic)
+    ? event.topic.map(decodeScVal)
+    : Array.isArray(event.topics)
+      ? event.topics.map(decodeScVal)
+      : [];
+  const data = eventData(event.value ?? event.data ?? event);
+  const bountyId = data.bounty_id ?? data.bountyId ?? event.bounty_id;
+  const maintainer = addressString(data.maintainer ?? event.maintainer);
+  const contributor = addressString(data.contributor ?? event.contributor);
+  const arbiter = addressString(data.arbiter ?? event.arbiter);
+  const type = EVENT_TYPES[topics[1]] ?? event.type;
+
+  const normalized = {
+    id: event.id ?? event.paging_token ?? event.pagingToken,
+    type,
+    bountyId: jsonSafe(bountyId),
+    actor: maintainer ?? contributor ?? addressString(event.actor),
+    maintainer,
+    contributor,
+    arbiter,
+    amount: jsonSafe(data.amount ?? event.amount),
+    timestamp: event.ledger_closed_at ?? event.ledgerClosedAt ?? event.timestamp,
     raw: event,
   };
+
+  // For the release transition, surface the contributor and amount explicitly so
+  // consumers can react without a follow-up contract read. The payload already
+  // carries these fields (BountyReleased), so this is just a convenience view.
+  if (type === " release".trim()) {
+    normalized.released = true;
+  }
+
+  return normalized;
 }
 
 // Save events to file (or replace with DB logic)
@@ -117,12 +174,12 @@ function startWorker() {
   // Deliberately omits SOROBAN_RPC_URL: some RPC providers embed an API key in it.
   console.log(
     `[Indexer] Effective config: pollIntervalMs=${POLL_INTERVAL_MS} ` +
-      `maxRetries=${MAX_RETRIES} initialBackoffMs=${INITIAL_BACKOFF_MS}`,
+      `maxRetries=${MAX_RETRIES} initialBackoffMs=${INITIAL_BACKKOFF_MS}`,
   );
   setInterval(pollEvents, POLL_INTERVAL_MS);
 }
 
-if (require.main === module) {
+if (isMainThread && process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   startWorker();
 }
 

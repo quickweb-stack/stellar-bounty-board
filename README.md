@@ -337,7 +337,7 @@ Routes:
     - `404 Not Found` — bounty ID not found (`BOUNTY_NOT_FOUND`).
     - `409 Conflict` — bounty is not in submitted state or maintainer mismatch.
     - `429 Too Many Requests` — rate limit exceeded.
-- `POST /api/bounties/:id/refund`
+- `POST /api/bounties/:id/refund` — refund a bounty; see the [request and response contract](#refund-request-and-responses) below.
 - `GET /api/open-issues` — fetch available candidate GitHub issues for bounties
   - **Request**: No request body or query parameters required.
   - **Response 200 OK**: Cached for 10 minutes (`Cache-Control: max-age=600`).
@@ -357,6 +357,146 @@ Routes:
   - **Error Responses**:
     - `502 Bad Gateway` — upstream GitHub API unreachable or returned failure.
     - `429 Too Many Requests` — rate limit exceeded.
+
+### Refund request and responses
+
+`POST /api/bounties/:id/refund` returns the updated bounty record, not an on-chain transaction receipt. The current handler updates the JSON store; an optional transaction hash is recorded, not submitted or verified on-chain.
+
+#### Request
+
+Send a JSON object with `Content-Type: application/json`. The `:id` path parameter is a non-empty string after trimming; the handler does not enforce the `BNT-0001` format. No query parameters are used.
+
+| Body field        | Type   | Required            | Meaning                                                                                                                                                                                                                                |
+| ----------------- | ------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maintainer`      | string | Yes                 | Valid Stellar `G...` public key (56 characters, checksum checked), matching the signer and the bounty's maintainer. The schema trims it, but authentication compares the original value first; send it without surrounding whitespace. |
+| `transactionHash` | string | No                  | Exactly 64 hexadecimal characters after trimming. Saved as `refundedTxHash`; omitting it preserves an existing value, if any.                                                                                                          |
+| `action`          | string | With authentication | Send `"refund"`. The current authentication middleware checks only that this is a non-empty string, not that it equals the route's action.                                                                                             |
+| `bountyId`        | string | With authentication | Must exactly equal the decoded `:id` path parameter before the handler trims it.                                                                                                                                                       |
+| `timestamp`       | number | With authentication | Unix time in seconds, within 60 seconds of the server's current time in either direction.                                                                                                                                              |
+
+Authentication also requires:
+
+- `X-Stellar-Public-Key`: the signing public key, present in the server's `MAINTAINER_PUBLIC_KEYS` list (or `MAINTAINER_PUBLIC_KEY` fallback) and matching the stored bounty maintainer.
+- `X-Stellar-Signature`: a signature over the exact JSON request-body bytes, including the authentication fields. Hex or base64 is accepted, optionally prefixed with `0x`, `sig=` or `signature=`. Do not reserialize the body after signing. A verified signature cannot be reused within 60 seconds, even if a later check rejects the request.
+- Optional `Idempotency-Key`: a unique key for this operation; see the replay behavior below.
+
+Authentication runs before body validation. It is skipped only when `NODE_ENV=test` and `STELLAR_AUTH_ENFORCED` is not `"true"`; the `maintainer`/`transactionHash` schema still applies. After authentication, validation strips `action`, `bountyId`, `timestamp` and other unknown fields before calling the store.
+
+#### Response 200 OK
+
+For a newly executed refund, the JSON body is `{ "data": RefundedBounty }`. The following is a type description, not a sample bounty:
+
+```ts
+type RefundedBounty = {
+  id: string;
+  repo: string;
+  issueNumber: number;
+  title: string;
+  summary: string;
+  maintainer: string;
+  tokenSymbol: string;
+  tokenAddress: string;
+  amount: number;
+  labels: string[];
+  status: 'refunded';
+  createdAt: number;
+  deadlineAt: number;
+  refundedAt: number;
+  version: number;
+  events: Array<{
+    type:
+      | 'created'
+      | 'open'
+      | 'reserved'
+      | 'submitted'
+      | 'released'
+      | 'refunded'
+      | 'expired'
+      | 'disputed'
+      | 'notes_updated'
+      | 'deadline_extended'
+      | 'archived'
+      | 'pr_merged';
+    timestamp: number;
+    actor?: string;
+    details?: Record<string, unknown>;
+  }>;
+  contributor?: string;
+  reservedAt?: number;
+  submittedAt?: number;
+  releasedAt?: number;
+  releasedTxHash?: string;
+  protocolFeeCollected?: number;
+  refundedTxHash?: string;
+  canceledAt?: number;
+  canceledTxHash?: string;
+  submissionUrl?: string;
+  notes?: string;
+  disputedAt?: number;
+  disputeReason?: string;
+  lastDisputeAlertAt?: number;
+  prMerged?: boolean;
+  prMergedAt?: number;
+  reservationTimeoutSeconds?: number;
+  archived?: boolean;
+  archivedAt?: number;
+};
+```
+
+All timestamp fields above are Unix seconds, not ISO strings. Optional fields are omitted when undefined, not returned as `null`. The store preserves existing fields, sets `status` and `refundedAt`, increments `version` by one, and appends `{ type: "refunded", timestamp: refundedAt, actor: maintainer }` to `events`. The current store accepts `open`, `reserved`, `expired` and `disputed` bounties; it rejects `submitted`, `released` and `refunded` bounties. It does not require the deadline to have passed.
+
+#### Error responses
+
+The table covers the refund handler and its mounted middleware on a cache miss. `requestId` is a string when request context has run; earlier parser failures omit it. An `X-Request-ID` response header is set when that context runs. Error bodies are not all the same shape.
+
+| HTTP status                  | JSON body shape                                                                                                      | Condition                                                                                                                                                                                                                                                                                                             |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400 Bad Request`            | `{ "error": "Invalid JSON" }`                                                                                        | Malformed JSON rejected by the global parser.                                                                                                                                                                                                                                                                         |
+| `400 Bad Request`            | `{ "error": "Validation failed", "details": ZodIssue[] }`                                                            | Invalid body, missing/invalid `maintainer`, or invalid `transactionHash`; details are described below.                                                                                                                                                                                                                |
+| `400 Bad Request`            | `{ "error": string, "requestId": string }`                                                                           | Invalid trimmed path ID or a store/domain error. Exact domain messages are listed below. A path-validation error is the stringified Zod error, not a `details` array.                                                                                                                                                 |
+| `400 Bad Request`            | `{ "error": string, "requestId"?: string }`                                                                          | Other exposed parser errors, such as a mismatched content length. A disconnected client may not receive a response.                                                                                                                                                                                                   |
+| `401 Unauthorized`           | `{ "error": string }`                                                                                                | Authentication failed; exact messages are listed below.                                                                                                                                                                                                                                                               |
+| `403 Forbidden`              | `{ "error": "Signer public key does not match stored bounty maintainer." }`                                          | The authenticated signer is not the stored bounty maintainer.                                                                                                                                                                                                                                                         |
+| `413 Payload Too Large`      | `{ "error": "Payload too large", "maxBytes": number }`                                                               | Route `Content-Length` limit exceeded (`DEFAULT_BODY_LIMIT`, default `32kb` / `32768` bytes), or the global JSON parser limit exceeded (`RAW_BODY_LIMIT`, default `256kb`). The global parser error handler reports `maxBytes: 32768` regardless of its configured parser limit.                                      |
+| `415 Unsupported Media Type` | `{ "error": string }`                                                                                                | The JSON parser rejects an unsupported charset or content encoding, with a message such as `unsupported charset "ISO-8859-1"` or `unsupported content encoding "br"`. This route does **not** mount `requireJsonContentType`; a missing/non-JSON content type does not itself produce that middleware's 415 response. |
+| `429 Too Many Requests`      | `{ "error": "Too many mutations, please slow down." }` or `{ "error": "Too many read requests, please slow down." }` | Per-IP rate limiting in `app.ts`; both the global mutation limiter and the unconditionally mounted read limiter can reject this POST. The mutation limiter is also mounted on the route. Rate-limit responses include `Retry-After`.                                                                                  |
+| `500 Internal Server Error`  | `{ "error": "Server maintainer public key configuration is missing." }`                                              | Authentication is enabled but no maintainer key is configured.                                                                                                                                                                                                                                                        |
+| `500 Internal Server Error`  | `{ "error": "Failed to access persistent data store.", "requestId": string }`                                        | JSON bounty-store or audit-store read/write failure.                                                                                                                                                                                                                                                                  |
+| `500 Internal Server Error`  | `{ "error": "Internal server error.", "requestId"?: string }`                                                        | Unexpected middleware failure, or a handler failure whose message would expose internal dependency details.                                                                                                                                                                                                           |
+| `503 Service Unavailable`    | `{ "error": "Data store lock could not be acquired.", "requestId": string }`                                         | Store file-lock acquisition failed.                                                                                                                                                                                                                                                                                   |
+
+The refund handler returns these domain errors as **400**, not 404 or 409:
+
+- `Bounty not found.`
+- `Maintainer address does not match this bounty.`
+- `This bounty is already finalized.`
+- `Submitted bounties must be reviewed before refund.`
+
+The authentication middleware returns these **401** messages:
+
+- `Missing x-stellar-signature header.`
+- `Missing x-stellar-public-key header.`
+- `Unauthorized Stellar public key.`
+- `Invalid or missing action in request body.`
+- `Invalid or missing bountyId in request body.`
+- `Request bountyId does not match the request path.`
+- `Invalid or missing timestamp in request body.`
+- `Signature timestamp has expired or is invalid.`
+- `Replay attack detected: signature already processed.`
+- `Invalid Stellar signature.`
+- `Request maintainer does not match signer public key.`
+
+**Error codes:** There is no top-level `code`/`errorCode` field and no refund-specific machine codes such as `BOUNTY_NOT_FOUND` or `INVALID_BODY`. Body-validation `details` entries have `path: (string | number)[]`, `message: string` and Zod's `code`. For this request schema, those codes are `invalid_type` (with `expected` and `received`), `custom` (invalid Stellar public key), and `invalid_string` (with `validation: "regex"`, for a transaction hash). The path is `[]` for the whole body, `["maintainer"]` or `["transactionHash"]` for a field. Key/hash messages are respectively `Must be a valid Stellar public key (G... format, 56 characters with valid checksum).` and `Transaction hash must be a 64 character hex string.`
+
+#### Retries and idempotency
+
+`Idempotency-Key` is optional and trimmed; blank keys are ignored. For the configured `IDEMPOTENCY_TTL_MS` (default 10 minutes), a completed cached JSON response is replayed with its original status and body, including error responses. A hit bypasses authentication, validation and the refund handler, but not earlier parsing, rate limits or the body-size check.
+
+Keys are global within one process, not scoped to the route, bounty or caller. Reusing a key from another operation can return that operation's status/body instead of the refund contract above: for example, a cached release can return `200` with `data.status: "released"` and no `refundedAt`. Use a distinct key for each operation. The cache is lost on restart, is not shared across replicas, and does not coalesce concurrent requests before a response is stored.
+
+A failed response does not always mean the bounty was unchanged: the refund is persisted before the audit write. After a store/server error or an uncertain response, inspect the bounty's current state before attempting another refund. If a corrected request is needed after a cached error, use a new idempotency key and a fresh signature rather than replaying the rejected request.
+
+Sources of truth: the [route and error handlers](backend/src/app.ts), [request schema](backend/src/validation/schemas.ts), [store record and refund implementation](backend/src/services/bountyStore.ts), [authentication](backend/src/middleware/auth.ts), [idempotency](backend/src/middleware/idempotency.ts), and [terminal error handler](backend/src/middleware/errors.ts).
 
 ## Run Locally
 
